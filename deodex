@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+
+# Let's make output snappy
+lightblue='\e[1;34m'
+lightgreen='\e[1;32m'
+lightred='\e[1;31m'
+nc='\e[0m'
+
+# Make temp work dir
+if ! TMPDIR="$(mktemp -d)" 2> /dev/null; then
+    TMPDIR="${PWD}"/tmp
+fi
+mkdir -p "${TMPDIR}"/dexout
+
+if [[ "$#" -lt 1 ]]; then
+    echo -e "${lightred}You have to specify at least one app to deodex or use -a/--all to deodex all files.${nc}"
+    exit 1
+fi
+
+# REQUIREMENT: cd into $ROM_DUMP/system
+if [[ ! -d framework ]]; then
+    echo -e "${lightred}Please make sure to cd into \$ROM_DUMP/system first.${nc}"
+    exit 1
+fi
+
+if [[ $1 == "--all" || $1 == "-a" ]]; then
+    mapfile -t files <<< "$(find . \( -iname '*.jar' -o -iname '*.apk' \) | sort)"
+    SKIPBACKUP=true
+else
+    mapfile -t files <<< "$@"
+fi
+
+for arch in {arm,arm64}; do
+    if [[ -d framework/"${arch}" ]]; then
+        device_arches+=("$arch")
+    fi
+done
+
+# Process
+for device_arch in "${device_arches[@]}"; do
+    BOOTOAT="$(readlink -f framework/"${device_arch}"/boot.oat)"
+    for file in "${files[@]}"; do
+        FPATH="${file}"
+        FILE=$(basename "${FPATH}")
+        FNAME="${FILE%\.*}"
+        
+        if grep classes.dex "${FPATH}" &> /dev/null; then
+            # Detect apk or jar
+            if [[ ${FPATH} = *.apk ]]; then
+                APPDIR=$(dirname "${FPATH}")
+                if ls "${APPDIR}"/oat/"${device_arch}"/"${FNAME}"* 1> /dev/null 2>&1; then
+                    OAT=$(readlink -f "$APPDIR"/oat/"${device_arch}")
+                else
+                    if ! [[ $1 == "--all" || $1 == "-a" ]]; then
+                        echo -e "${lightred}Error: Couldn't find .odex or .vdex for following app: ${FILE}"
+                    fi
+                    continue
+                fi
+            elif [[ ${FPATH} = *.jar ]]; then
+                if ls framework/oat/"${device_arch}"/"${FNAME}"* 1> /dev/null 2>&1; then
+                    OAT=$(readlink -f framework/oat/"${device_arch}")
+                    BOOTJAR="false"
+                elif ls framework/boot-"${FNAME}"* 1> /dev/null 2>&1; then
+                    BOOTJAR="true"
+                else
+                    if ! [[ $1 == "--all" || $1 == "-a" ]]; then
+                        echo -e "${lightred}Error: Couldn't find .odex or .vdex for following jar: ${FILE}"
+                    fi
+                    continue
+                fi
+            fi
+            DEX=$(readlink -f "${OAT}"/"${FNAME}".odex)
+            VDEX=$(readlink -f "${OAT}"/"${FNAME}".vdex)
+            if [[ ${BOOTJAR} == "true" ]]; then
+                VDEX=$(readlink -f framework/boot-"${FNAME}".vdex)
+                FILE="boot-${FNAME}"
+            fi
+
+            # Make backup
+            if [[ ! ${SKIPBACKUP} ]]; then
+                cp "${FPATH}" "${FPATH}".oldbak
+            fi
+
+            if [[ -f ${VDEX} ]]; then
+                # Use vdexExtractor for .dex if .vdex is present
+                "${__VDEXEXTRACTOR}" -o "${TMPDIR}" -i "${VDEX}" &> /dev/null
+                if [[ -f $(readlink -f "${TMPDIR}/${FNAME}_classes.cdex") ]]; then
+                    "${__CDEXCONVERTER}" "${TMPDIR}/${FNAME}_classes.cdex" &> /dev/null
+                    mv "${TMPDIR}/${FILE}_classes.cdex.new" "${TMPDIR}/classes.dex"
+                elif [[ -f $(readlink -f "${TMPDIR}/${FNAME}_classes.dex") ]]; then
+                    mv "${TMPDIR}/${FNAME}_classes.dex" "${TMPDIR}/classes.dex"
+                fi
+            else
+                # Use baksmali/smali for dex
+                java -jar "$__BAKSMALIJAR" deodex -o "${TMPDIR}/dexout" -b "$BOOTOAT" -d "${OAT}" "${DEX}"
+                java -jar "$__SMALIJAR" assemble "${TMPDIR}/dexout" -o "${TMPDIR}/classes.dex"
+                rm -rf "${TMPDIR}"/dexout/*
+            fi
+
+            if [[ -f ${TMPDIR}/classes.dex ]]; then
+                # Pack deodexed file
+                zip -gjq "${FPATH}" "${TMPDIR}"/classes.dex
+
+                # Cleanup
+                rm "${TMPDIR}"/classes.dex
+                for string in "$DEX" "$VDEX"; do
+                    TO_REMOVE+=("$string")
+                done
+                echo -e "${lightgreen}Deodexed: ${FPATH}${nc}"
+            else
+                echo -e "${lightblue}${FPATH} already deodexed${nc}"
+            fi
+        else
+            echo -e "${lightblue}${FPATH} already deodexed${nc}"
+        fi
+    done
+done
+
+if [[ $1 == "--all" || $1 == "-a" ]]; then
+    for file in "${TO_REMOVE[@]}"; do
+    rm -f "${file}"
+    done
+fi
+rm -rf "${TMPDIR}"

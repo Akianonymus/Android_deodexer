@@ -209,7 +209,7 @@ downloadPrebuilts() {
     else
         printf "Downloading prebuilts..\n"
         for URL in "${URLS[@]}"; do
-            if curl -C - -# -L "${URL}" -o "${PREBUILTS_PATH}"/__prebuilts.tar.gz; then
+            if curl -# -L "${URL}" -o "${PREBUILTS_PATH}"/__prebuilts.tar.gz; then
                 cd "${PREBUILTS_PATH}" || exit
                 if tar -xf __prebuilts.tar.gz && rm -f __prebuilts.tar.gz; then
                     cd - 1> /dev/null || exit
